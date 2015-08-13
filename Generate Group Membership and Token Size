@@ -1,0 +1,56 @@
+# Sends Active Directory group membership and token size information via email
+# Requires Quest Active Directory Snapin
+
+Add-PSSnapin Quest.ActiveRoles.ADManagement
+Add-PSSnapin MVPSI.JAMS
+$Domain = "INSERT_YOUR_DOMAIN_HERE"
+$BaseDN = "dc=YOURDOMAIN,dc=xxx"
+$DC = "INSERT_YOUR_DC_HERE"
+$SMTPServer = "INSERT_YOUR_SMTP_SERVER_HERE"
+
+$SubmittedBy = "<<JAMS.Current.SubmittedBy>>" -replace "$Domain\\", ""
+$DSQuery = "SELECT * FROM ds_user where ds_sAMAccountName='$SubmittedBy'"
+$Caller = Get-WmiObject -Query $DSQuery -Namespace "root\Directory\LDAP"
+$Quibono = $Caller.DS_mail
+
+$TargetUser = "<<User>>"
+if ($TargetUser -eq "me") {
+		$TargetUser = $Caller.ds_samaccountname
+}
+
+# method and partial code pulled from https://ping.force.com/Support/PingFederate/Integrations/How-to-Calculate-Users-Access-Token-Size-IWA
+$User = Get-QADUser -SearchRoot $BaseDN -Service $DC -LdapFilter "(samaccountname=$TargetUser)"
+$Groups = Get-QADMemberOf -Identity $User -Indirect -IncludedProperties "sidhistory"
+$Size = 1200
+
+$Body = "<table><tr><th>Group Name</th><th>Group Scope</th><th>Token Size</th></tr>"
+foreach ($Group in $Groups){
+		$IncreaseBy = 0
+		if ($Group.groupscope -eq "Global"){
+				$IncreaseBy += 8
+		}
+		if (($Group.groupscope -eq "Universal") -and ($Group.GroupScope -match $BaseDN)){
+				$IncreaseBy += 8
+		}
+		if (($Group.GroupScope -eq "Universal") -and ($Group.GroupScope -notmatch $BaseDN)){
+				$IncreaseBy += 40
+		}
+		if ($Group.GroupScope -eq "DomainLocal"){
+				$IncreaseBy += 40
+		}
+		if ($Group.sidhistory){
+				if ($Group.sidhistory.count){
+						$IncreaseBy += ($Group.sidhistory.count * 40)
+				}
+				else {
+						$IncreaseBy += 40
+				}
+		}
+		$Size += $IncreaseBy
+		$Body += "<tr><td>$($Group.Name)</td><td>$($Group.GroupScope)</td><td>$IncreaseBy</td></tr>"
+}
+$Body += "</table></html>"
+$Body = "<html>$($User.Name)'s token size is: " + [string][Math]::Round(($Size / 1024),1) + " KB<p><p><br><br>" + $Body
+
+$Subject = "Token Size and Group Membership for $TargetUser"
+Send-MailMessage -To $Quibono -Subject $Subject -From $Host.PrivateData.HostName -Body $Body -BodyAsHtml -SmtpServer $SMTPServer
